@@ -64,13 +64,18 @@ func sendRequest(url string) (Response, error) {
 			return response, fmt.Errorf("non-200 status code: %d\nResponse body: %s", resp.StatusCode, body)
 		}
 
-		err = json.NewDecoder(resp.Body).Decode(&response)
+		err = decodeResponse(resp.Body, &response)
 		if err != nil {
 			return response, fmt.Errorf("error decoding JSON response: %v", err)
 		}
 		return response, nil
 	}
 	return response, fmt.Errorf("retries exceeded")
+}
+
+// decodeResponse is a helper function to decode a response body into a Response struct
+func decodeResponse(body io.Reader, response *Response) error {
+	return json.NewDecoder(body).Decode(response)
 }
 
 func getTotalWallets() (int, error) {
@@ -103,7 +108,8 @@ func SetPointsForLevel() ([]int, error) {
 
 	var wg sync.WaitGroup
 	result := make([]int, len(percentForTop))
-	errChan := make(chan error, len(percentForTop))
+	var once sync.Once
+	var finalErr error
 
 	for i, percent := range percentForTop {
 		wg.Add(1)
@@ -112,7 +118,7 @@ func SetPointsForLevel() ([]int, error) {
 			rank := int(float64(totalUsers) * percent)
 			totalPoints, err := getTotalPoints(rank)
 			if err != nil {
-				errChan <- fmt.Errorf("failed to get total points for rank %d: %v", rank, err)
+				once.Do(func() { finalErr = fmt.Errorf("failed to get total points for rank %d: %v", rank, err) })
 				return
 			}
 			result[i] = totalPoints
@@ -121,12 +127,11 @@ func SetPointsForLevel() ([]int, error) {
 
 	wg.Wait()
 
-	select {
-	case err := <-errChan:
-		return nil, err
-	default:
-		return result, nil
+	if finalErr != nil {
+		return nil, finalErr
 	}
+
+	return result, nil
 }
 
 func main() {
