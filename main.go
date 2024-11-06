@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -37,8 +38,9 @@ const (
 
 var percentForTop = []float64{0.0001, 0.001, 0.005, 0.01, 0.03, 0.04, 0.06, 0.08, 0.1, 0.18, 0.26}
 
+var client = &http.Client{Timeout: timeout}
+
 func sendRequest(url string) (Response, error) {
-	client := &http.Client{Timeout: timeout}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return Response{}, fmt.Errorf("error creating request: %v", err)
@@ -92,17 +94,33 @@ func SetPointsForLevel() ([]int, error) {
 		return nil, fmt.Errorf("failed to get total wallets: %v", err)
 	}
 
-	var result []int
-	for _, percent := range percentForTop {
-		rank := int(float64(totalUsers) * percent)
-		url := fmt.Sprintf(baseURL+"?page=%d&size=1", rank)
-		totalPoints, err := getTotalPoints(url)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get total points for rank %d: %v", rank, err)
-		}
-		result = append(result, totalPoints)
+	var wg sync.WaitGroup
+	result := make([]int, len(percentForTop))
+	errChan := make(chan error, len(percentForTop))
+
+	for i, percent := range percentForTop {
+		wg.Add(1)
+		go func(i int, percent float64) {
+			defer wg.Done()
+			rank := int(float64(totalUsers) * percent)
+			url := fmt.Sprintf("%s?page=%d&size=1", baseURL, rank)
+			totalPoints, err := getTotalPoints(url)
+			if err != nil {
+				errChan <- fmt.Errorf("failed to get total points for rank %d: %v", rank, err)
+				return
+			}
+			result[i] = totalPoints
+		}(i, percent)
 	}
-	return result, nil
+
+	wg.Wait()
+
+	select {
+	case err := <-errChan:
+		return nil, err
+	default:
+		return result, nil
+	}
 }
 
 func main() {
