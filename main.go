@@ -41,30 +41,36 @@ var percentForTop = []float64{0.0001, 0.001, 0.005, 0.01, 0.03, 0.04, 0.06, 0.08
 var client = &http.Client{Timeout: timeout}
 
 func sendRequest(url string) (Response, error) {
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return Response{}, fmt.Errorf("error creating request: %v", err)
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return Response{}, fmt.Errorf("error sending request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return Response{}, fmt.Errorf("non-200 status code: %d\nResponse body: %s", resp.StatusCode, body)
-	}
-
 	var response Response
-	err = json.NewDecoder(resp.Body).Decode(&response)
-	if err != nil {
-		return Response{}, fmt.Errorf("error decoding JSON response: %v", err)
-	}
+	for attempts := 0; attempts < retryLimit; attempts++ {
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return response, fmt.Errorf("error creating request: %v", err)
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0")
 
-	return response, nil
+		resp, err := client.Do(req)
+		if err != nil {
+			if attempts < retryLimit-1 {
+				time.Sleep(time.Second * time.Duration(attempts+1)) // Exponential backoff
+				continue
+			}
+			return response, fmt.Errorf("error sending request after retries: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return response, fmt.Errorf("non-200 status code: %d\nResponse body: %s", resp.StatusCode, body)
+		}
+
+		err = json.NewDecoder(resp.Body).Decode(&response)
+		if err != nil {
+			return response, fmt.Errorf("error decoding JSON response: %v", err)
+		}
+		return response, nil
+	}
+	return response, fmt.Errorf("retries exceeded")
 }
 
 func getTotalWallets() (int, error) {
@@ -75,7 +81,8 @@ func getTotalWallets() (int, error) {
 	return response.Data.Total, nil
 }
 
-func getTotalPoints(url string) (int, error) {
+func getTotalPoints(rank int) (int, error) {
+	url := fmt.Sprintf("%s?page=%d&size=1", baseURL, rank)
 	response, err := sendRequest(url)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get total points: %v", err)
@@ -103,8 +110,7 @@ func SetPointsForLevel() ([]int, error) {
 		go func(i int, percent float64) {
 			defer wg.Done()
 			rank := int(float64(totalUsers) * percent)
-			url := fmt.Sprintf("%s?page=%d&size=1", baseURL, rank)
-			totalPoints, err := getTotalPoints(url)
+			totalPoints, err := getTotalPoints(rank)
 			if err != nil {
 				errChan <- fmt.Errorf("failed to get total points for rank %d: %v", rank, err)
 				return
