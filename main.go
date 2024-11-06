@@ -145,5 +145,7 @@ func main() {
 		log.Fatalf("Error: %v", err)
 	}
 
-	fmt.Printf("Points for top ranks: %v\n", points)
+	for _, pointsForLevel := range points {
+		fmt.Println(pointsForLevel)
+	}
 }
