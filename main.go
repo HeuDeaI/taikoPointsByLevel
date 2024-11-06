@@ -9,6 +9,7 @@ import (
 	"time"
 )
 
+// User represents a user in the leaderboard
 type User struct {
 	Rank       int     `json:"rank"`
 	Address    string  `json:"address"`
@@ -17,6 +18,7 @@ type User struct {
 	TotalScore float64 `json:"totalScore"`
 }
 
+// Data represents the data returned from the leaderboard API
 type Data struct {
 	Users      []User `json:"items"`
 	Page       int    `json:"page"`
@@ -25,6 +27,7 @@ type Data struct {
 	TotalPages int    `json:"total_pages"`
 }
 
+// Response represents the full response structure from the API
 type Response struct {
 	Data        Data  `json:"data"`
 	LastUpdated int64 `json:"lastUpdated"`
@@ -36,61 +39,67 @@ const (
 	retryLimit = 3
 )
 
-var percentForTop = []float64{0.0001, 0.001, 0.005, 0.01, 0.03, 0.04, 0.06, 0.08, 0.1, 0.18, 0.26}
+// Percentages for the top leaderboard users
+var topPercentages = []float64{
+	0.0001, 0.001, 0.005, 0.01, 0.03, 0.04, 0.06, 0.08, 0.1, 0.18, 0.26,
+}
 
 var client = &http.Client{Timeout: timeout}
 
-func sendRequest(url string) (Response, error) {
+// fetchResponse sends a GET request to the given URL and returns the response
+func fetchResponse(url string) (Response, error) {
 	var response Response
-	for attempts := 0; attempts < retryLimit; attempts++ {
+	for attempt := 0; attempt < retryLimit; attempt++ {
 		req, err := http.NewRequest("GET", url, nil)
 		if err != nil {
-			return response, fmt.Errorf("error creating request: %v", err)
+			return response, fmt.Errorf("failed to create request: %v", err)
 		}
 		req.Header.Set("User-Agent", "Mozilla/5.0")
 
 		resp, err := client.Do(req)
 		if err != nil {
-			if attempts < retryLimit-1 {
-				time.Sleep(time.Second * time.Duration(attempts+1)) // Exponential backoff
+			if attempt < retryLimit-1 {
+				time.Sleep(time.Second * time.Duration(attempt+1)) // Exponential backoff
 				continue
 			}
-			return response, fmt.Errorf("error sending request after retries: %v", err)
+			return response, fmt.Errorf("failed to send request after retries: %v", err)
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
-			return response, fmt.Errorf("non-200 status code: %d\nResponse body: %s", resp.StatusCode, body)
+			return response, fmt.Errorf("unexpected status code: %d\nResponse body: %s", resp.StatusCode, body)
 		}
 
-		err = decodeResponse(resp.Body, &response)
+		err = parseJSONResponse(resp.Body, &response)
 		if err != nil {
-			return response, fmt.Errorf("error decoding JSON response: %v", err)
+			return response, fmt.Errorf("failed to decode JSON response: %v", err)
 		}
 		return response, nil
 	}
 	return response, fmt.Errorf("retries exceeded")
 }
 
-// decodeResponse is a helper function to decode a response body into a Response struct
-func decodeResponse(body io.Reader, response *Response) error {
+// parseJSONResponse decodes the response body into the Response struct
+func parseJSONResponse(body io.Reader, response *Response) error {
 	return json.NewDecoder(body).Decode(response)
 }
 
+// getTotalWallets fetches the total number of wallets from the leaderboard API
 func getTotalWallets() (int, error) {
-	response, err := sendRequest(baseURL)
+	response, err := fetchResponse(baseURL)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get total wallets: %v", err)
+		return 0, fmt.Errorf("failed to fetch total wallets: %v", err)
 	}
 	return response.Data.Total, nil
 }
 
-func getTotalPoints(rank int) (int, error) {
+// getUserTotalPoints fetches the total points for a user at a specific rank
+func getUserTotalPoints(rank int) (int, error) {
 	url := fmt.Sprintf("%s?page=%d&size=1", baseURL, rank)
-	response, err := sendRequest(url)
+	response, err := fetchResponse(url)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get total points: %v", err)
+		return 0, fmt.Errorf("failed to fetch total points: %v", err)
 	}
 
 	if len(response.Data.Users) == 0 {
@@ -100,46 +109,47 @@ func getTotalPoints(rank int) (int, error) {
 	return int(response.Data.Users[0].TotalScore), nil
 }
 
-func SetPointsForLevel() ([]int, error) {
+// calculatePointsForTopUsers calculates the total points at specific ranks based on the percentage of total users
+func calculatePointsForTopUsers() ([]int, error) {
 	totalUsers, err := getTotalWallets()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get total wallets: %v", err)
 	}
 
 	var wg sync.WaitGroup
-	result := make([]int, len(percentForTop))
+	points := make([]int, len(topPercentages))
 	var once sync.Once
-	var finalErr error
+	var finalError error
 
-	for i, percent := range percentForTop {
+	for i, percentage := range topPercentages {
 		wg.Add(1)
-		go func(i int, percent float64) {
+		go func(i int, percentage float64) {
 			defer wg.Done()
-			rank := int(float64(totalUsers) * percent)
-			totalPoints, err := getTotalPoints(rank)
+			rank := int(float64(totalUsers) * percentage)
+			totalPoints, err := getUserTotalPoints(rank)
 			if err != nil {
-				once.Do(func() { finalErr = fmt.Errorf("failed to get total points for rank %d: %v", rank, err) })
+				once.Do(func() { finalError = fmt.Errorf("failed to get total points for rank %d: %v", rank, err) })
 				return
 			}
-			result[i] = totalPoints
-		}(i, percent)
+			points[i] = totalPoints
+		}(i, percentage)
 	}
 
 	wg.Wait()
 
-	if finalErr != nil {
-		return nil, finalErr
+	if finalError != nil {
+		return nil, finalError
 	}
 
-	return result, nil
+	return points, nil
 }
 
 func main() {
-	result, err := SetPointsForLevel()
+	points, err := calculatePointsForTopUsers()
 	if err != nil {
 		fmt.Println("Error:", err)
 		return
 	}
 
-	fmt.Printf("Result: %v\n", result)
+	fmt.Printf("Points for top ranks: %v\n", points)
 }
